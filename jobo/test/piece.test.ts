@@ -9,8 +9,10 @@ describe('piece definition', () => {
 
   test('exposes the planned surface', () => {
     expect(metadata.displayName).toBe('Jobo')
-    expect(Object.keys(metadata.actions).sort()).toEqual(['custom_api_call', 'find_company', 'geocode_location', 'get_job', 'search_jobs'])
-    expect(Object.keys(metadata.triggers)).toEqual(['new_job'])
+    expect(Object.keys(metadata.actions).sort()).toEqual([
+      'custom_api_call', 'find_company', 'geocode_location', 'get_job', 'list_company_hiring_signals', 'list_hiring_signals', 'search_jobs',
+    ])
+    expect(Object.keys(metadata.triggers)).toEqual(['new_job', 'new_hiring_signal'])
     expect(metadata.auth).toMatchObject({ type: 'SECRET_TEXT', required: true })
   })
 
@@ -19,7 +21,7 @@ describe('piece definition', () => {
   })
 
   test('every hand-written action and the trigger carry the AI metadata upstream requires', () => {
-    for (const name of ['search_jobs', 'get_job', 'find_company', 'geocode_location']) {
+    for (const name of ['search_jobs', 'get_job', 'find_company', 'geocode_location', 'list_hiring_signals', 'list_company_hiring_signals']) {
       const action = metadata.actions[name]
       expect(action.audience).toBe('both')
       expect(action.classification).toBeDefined()

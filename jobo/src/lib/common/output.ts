@@ -1,4 +1,5 @@
 import type { CompanySuggestion, Job } from '@jobo-ai/connector-core'
+import { joboSignalSummary } from './signal-summary'
 
 function flattenJob(job: Job & JobExtras): FlatRecord {
   const company = job.company ?? null
@@ -96,6 +97,54 @@ function flattenLocation({ location, input }: { location: GeocodedLocation, inpu
   }
 }
 
+function flattenSignal(signal: unknown): SignalRecord {
+  const source = record(signal)
+  const company = record(source['company'])
+  const focus = record(source['focus'])
+  const details = record(source['details'])
+  return {
+    id: text(source['id']),
+    type: text(source['type']),
+    type_label: joboSignalSummary.signalTypeLabel(source['type']),
+    summary: joboSignalSummary.describeSignal({ type: source['type'], details: source['details'] }),
+    detected_on: text(source['detected_on']),
+    created_at: text(source['created_at']),
+    window_start: text(source['window_start']),
+    window_end: text(source['window_end']),
+    strength: num(source['strength']),
+    company_id: text(company['id']),
+    company_name: text(company['name']),
+    company_domain: text(company['domain']),
+    company_country_code: text(company['country_code']),
+    company_size: text(company['size']),
+    company_industry: text(company['industry']),
+    company_industries: joined({ values: company['industries'], separator: LIST_SEPARATOR }),
+    company_categories: joined({ values: company['categories'], separator: LIST_SEPARATOR }),
+    company_is_agency: flag(company['is_agency']),
+    company_funding_stage: text(company['funding_stage']),
+    company_founded_year: num(company['founded_year']),
+    focus_functions: joined({ values: focus['functions'], separator: LIST_SEPARATOR }),
+    focus_title: text(focus['title']),
+    focus_occupation: text(focus['occupation']),
+    focus_seniority: text(focus['seniority']),
+    focus_topics: joined({ values: focus['topics'], separator: LIST_SEPARATOR }),
+    focus_topic_category: text(focus['topic_category']),
+    focus_job_countries: joined({ values: focus['job_countries'], separator: LIST_SEPARATOR }),
+    focus_job_regions: joined({ values: focus['job_regions'], separator: LIST_SEPARATOR }),
+    focus_job_cities: joined({ values: focus['job_cities'], separator: LIST_SEPARATOR }),
+    evidence_job_ids: strings(source['evidence_job_ids']),
+    details,
+  }
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? { ...value } : {}
+}
+
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string' && entry !== '') : []
+}
+
 function skillNames(bucket: { skills?: { name?: string | null }[] | null } | null | undefined): string | null {
   const skills = bucket?.skills
   if (!Array.isArray(skills)) return null
@@ -179,7 +228,35 @@ const JOB_SAMPLE: FlatRecord = {
   updated_at: '2026-11-19T04:15:42Z',
 }
 
+const SIGNAL_SAMPLE: SignalRecord = flattenSignal({
+  id: '5b0c1d2e-3f40-4a5b-8c6d-7e8f90a1b2c3',
+  type: 'hiring_surge',
+  detected_on: '2026-11-20',
+  created_at: '2026-11-20T06:12:00.123456Z',
+  window_start: '2026-11-14',
+  window_end: '2026-11-20',
+  strength: 82,
+  company: {
+    id: '0f8fad5b-d9cb-469f-a165-70867728950e',
+    name: 'Northwind Robotics',
+    domain: 'northwind-robotics.example',
+    country_code: 'DE',
+    size: '201-500',
+    industry: 'Software Development',
+    industries: ['Software Development', 'Robotics'],
+    categories: ['b2b', 'saas'],
+    is_agency: false,
+    funding_stage: 'Series B',
+    founded_year: 2015,
+  },
+  focus: { functions: ['technology', 'sales'], topics: [], job_countries: ['DE'], job_regions: [], job_cities: [] },
+  details: { new_jobs: 17, baseline_weekly_avg: 3.1, ratio: 5.5, is_agency: false },
+  evidence_job_ids: ['7c9e6679-7425-40de-944b-e07fc1f90ae7'],
+})
+
 type FlatRecord = Record<string, string | number | boolean | null>
+
+type SignalRecord = Record<string, string | number | boolean | null | string[] | Record<string, unknown>>
 
 type JobExtras = {
   external_id?: string | null
@@ -203,7 +280,9 @@ export const joboOutput = {
   flattenJob,
   flattenCompany,
   flattenLocation,
+  flattenSignal,
   JOB_SAMPLE,
+  SIGNAL_SAMPLE,
 }
 
-export type { FlatRecord, GeocodedLocation, JobExtras }
+export type { FlatRecord, GeocodedLocation, JobExtras, SignalRecord }

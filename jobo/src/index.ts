@@ -3,15 +3,18 @@ import { createPiece, PieceCategory } from '@activepieces/pieces-framework'
 import { findCompany } from './lib/actions/find-company'
 import { geocodeLocation } from './lib/actions/geocode-location'
 import { getJob } from './lib/actions/get-job'
+import { listCompanyHiringSignals } from './lib/actions/list-company-hiring-signals'
+import { listHiringSignals } from './lib/actions/list-hiring-signals'
 import { searchJobs } from './lib/actions/search-jobs'
 import { joboAuth } from './lib/auth'
 import { joboConstants } from './lib/common/constants'
+import { newHiringSignal } from './lib/triggers/new-hiring-signal'
 import { newJob } from './lib/triggers/new-job'
 
 export const jobo = createPiece({
   displayName: 'Jobo',
   description:
-    'Search and monitor open jobs from employer career sites and applicant tracking systems with the Jobo jobs data API.',
+    'Search and monitor open jobs from employer career sites and applicant tracking systems, and read company hiring signals, with the Jobo jobs data API.',
   auth: joboAuth,
   minimumSupportedRelease: '0.82.0',
   logoUrl: 'https://cdn.activepieces.com/pieces/jobo.png',
@@ -22,6 +25,8 @@ export const jobo = createPiece({
     getJob,
     findCompany,
     geocodeLocation,
+    listHiringSignals,
+    listCompanyHiringSignals,
     createCustomApiCallAction({
       auth: joboAuth,
       baseUrl: () => joboConstants.BASE_URL,
@@ -30,5 +35,5 @@ export const jobo = createPiece({
       }),
     }),
   ],
-  triggers: [newJob],
+  triggers: [newJob, newHiringSignal],
 })

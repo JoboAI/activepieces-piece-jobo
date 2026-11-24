@@ -17,9 +17,12 @@ Jobo.Connectors/activepieces/
       index.ts                      createPiece + Custom API Call
       lib/
         auth.ts                     API key, validated against a free endpoint
-        actions/                    search-jobs, get-job, find-company, geocode-location
+        actions/                    search-jobs, get-job, find-company, geocode-location,
+                                    list-hiring-signals, list-company-hiring-signals
         triggers/new-job.ts         New Job (polling)
-        common/                     client, constants, filters, lookups, output, props
+        triggers/new-hiring-signal.ts  New Hiring Signal (polling)
+        common/                     client, constants, filters, lookups, output, props,
+                                    signals, signal-props, signal-page, signal-poll, signal-summary
     test/                           vitest, HTTP mocked
 ```
 
@@ -37,8 +40,11 @@ classes. Billing text below is from `docs/billing.mdx` and `docs/connectors/over
 | Get Job by ID | `GET /api/jobs/{id}` | Free (`billing.mdx`, "Always free") |
 | Find Company | `GET /api/connectors/companies/suggest` | Free (see "Not confirmed" below) |
 | Geocode Location | `GET /api/locations/geocode` | $0.001 per lookup, found or not; not covered by included jobs or Unlimited (`billing.mdx`, "Metered endpoints") |
+| List Hiring Signals | `GET /api/signals` | Every signal returned, at ten times the price of a job, and again each time the same signal is read. Included signals first, then the wallet; no per-signal charge on Unlimited. An empty page is free (`docs/guides/hiring-signals.mdx`) |
+| List Company Hiring Signals | `GET /api/companies/{id}/signals` | The same as List Hiring Signals |
 | Custom API Call | any path under `https://connect.jobo.world` | Whatever the endpoint costs |
 | New Job trigger | `POST /api/jobs/feed` | A job is billed once per 30 days; a job already received is re-delivered free (`billing.mdx`, "Unique jobs on Feed") |
+| New Hiring Signal trigger | `GET /api/signals?sort=created_asc` | Every signal delivered, at ten times the price of a job. Each check asks only for signals stored after the last one delivered, so a signal is billed once in normal operation; a check that finds nothing is free. Turning the flow on and loading sample data make no request |
 | Dropdowns (sources, industries, skills, companies, places, occupations) | `GET /api/connectors/*`, `GET /api/occupations` | Free (see "Not confirmed" below) |
 
 No property text states a price: the descriptions say what is billed and link to `https://jobo.world/pricing`,
@@ -57,6 +63,86 @@ deep, so each key is a table column).
 A company value is never split at a comma, so a mapped name such as `Acme, Inc.` is sent whole (the n8n node does the
 same). Several values come as a mapped list, or one per line in a single text value. A company picked from the list
 carries all of its board ids, joined by line breaks.
+
+### List Hiring Signals and List Company Hiring Signals
+
+A hiring signal is one event at one company, detected from its job postings: a hiring surge, a first job in a
+country, a leadership search, a new technology, a slowdown. The six actions of the piece are Search Jobs, Get Job by
+ID, Find Company, Geocode Location and these two (plus the Custom API Call).
+
+- **Filters.** List Hiring Signals has every filter of the shared signals contract (`contracts/signals.json` in the
+  Jobo monorepo): signal types, company domains, IDs, countries, sizes, industries, categories and funding stages,
+  founded year, exclude staffing agencies and exclude domains, the focus filters (functions, roles, seniority,
+  technologies, skills, technology categories, job countries, regions and cities), minimum strength, minimum new
+  jobs, minimum days open, reposted only, detected on or after / before and created after. List Company Hiring
+  Signals takes a company ID and only what that endpoint takes: types, minimum strength, the two detection days and
+  created after. Signal types, company sizes and seniority are multi-selects; the other lists take one value per
+  line or a mapped list, as Companies does in Search Jobs. A value that contains a comma is refused, because the
+  API separates values with commas; so is a list of more than 100 values, a number out of range, a date that is not
+  a date and a company ID that is not a GUID. All of it is checked before any request.
+- **Cost.** Every signal returned is billed at ten times the price of a job, and billed again each time it is read.
+  Maximum Signals defaults to 10 and is capped at 100 (the API takes 200). A run sends exactly one request and never
+  reads a second page: it returns `has_more` and `next_cursor`, and the Cursor property takes `next_cursor` back to
+  read the next page in a later step. To read only what is new, map the newest `created_at` you stored into Created
+  After, which is exclusive; it is sent exactly as given, so a mapped `created_at` keeps its full precision.
+- **Output.** `{ signals, has_more, next_cursor }`. Each signal is one flat record: the signal's own fields,
+  `type_label`, `summary` (one sentence such as "17 new jobs this week vs 3.1 a week normally", the wording Jobo's
+  dashboard uses), the company flattened as `company_id`, `company_name`, `company_domain`, `company_country_code`,
+  `company_size`, `company_industry`, `company_industries`, `company_categories`, `company_is_agency`,
+  `company_funding_stage`, `company_founded_year`, the focus as `focus_functions`, `focus_title`, `focus_occupation`,
+  `focus_seniority`, `focus_topics`, `focus_topic_category`, `focus_job_countries`, `focus_job_regions`,
+  `focus_job_cities` (lists joined with ", "), `evidence_job_ids` as a list (Get Job by ID reads each one free) and
+  `details` as the object the API sent, which differs by type. A signal type added after this piece was written is
+  passed through with its type in words as the label.
+- **Transport.** `@jobo-ai/connector-core@0.5.0` from npm has no signals methods, and the piece keeps that version.
+  The two GET requests go through the piece's own transport (`httpClient`, the same headers and timeout as every
+  other call), with a local copy of the signals filter list, type labels and summary wording. `test/hiring-signals.test.ts`
+  checks the local lists against the contract's values, written into the test so it runs without the contracts folder.
+- **Errors.** Never retried: a 402 names the signal price and the top-up link; a 403 `account_key_required` asks for an
+  account API key; a sandbox key is told signals need a live key; a 429 carries the wait. A 5xx, a timeout or a lost
+  connection is reported as not retried, because the API settles the charge before it answers and a second read
+  would pay again. Leave the step's retry-on-failure setting off for the same reason.
+- **Trigger.** To be told about new signals, use the New Hiring Signal trigger below rather than List Hiring Signals
+  on a schedule.
+
+### New Hiring Signal trigger
+
+It reads `GET /api/signals` in the order signals were stored, so it **needs the API's `sort=created_asc`**. An API
+without it answers `400` naming `sort`, and the trigger reports that error.
+
+- **Position.** The trigger keeps one value under one key (`joboSignalPoll`) in the trigger store, scoped to the flow:
+  the `created_at` of the last signal it delivered, as the string the API sent. Each check sends it back as
+  `created_after` (exclusive) with `sort=created_asc`, so the API returns the next signals stored after it and
+  nothing it already delivered. The string is never parsed: `created_at` has microseconds and the signals of one
+  write batch are a microsecond apart, so a value rounded to the millisecond would bill signals again or skip them.
+  The poller is in `common/signal-poll.ts`, written in the piece because connector-core 0.5.0 on npm has none.
+- **First run.** Turning the flow on records the current time as that value and makes no request. Only signals
+  stored after that moment are delivered; nothing older is read or billed. A republish of a running flow keeps the
+  position; turning the flow off and on again, or changing its filters, starts again from that moment.
+- **Maximum Signals per Poll.** Default 10, 1 to 100, the same range as Maximum Signals on the action. It caps what
+  one check reads and so what one check bills. When more signals are waiting, the trigger keeps the API's
+  `next_cursor` with the `created_after` it was issued under, and the next check continues from that cursor with the
+  same `created_after`. A backlog arrives over several checks, oldest first, none skipped and none twice. If the API
+  refuses a held cursor (`400` naming `cursor`), the check drops it and reads once from the last `created_at`
+  delivered instead, which is the same position for every signal stored since `sort=created_asc` was released.
+- **When the position is saved.** After every page of the check has been read, just before the signals are handed
+  back to Activepieces, which starts one flow run per item `run` returns. A check that finds nothing saves nothing
+  and is free. If a check fails part-way (a 402 on the second page, a lost connection), it saves nothing and the
+  next check reads the same signals again; any page read before the failure is billed again. That is the price of
+  never losing a signal. Not verified in the Activepieces docs: what happens to the saved position if the engine
+  fails to start the flow runs for the items a successful `run` returned; such signals would not be delivered again.
+- **Guard.** At least one of Signal Types, Company Domains, Company IDs, Company Countries, Company Sizes,
+  Industries, Company Categories, Funding Stages, Functions, Roles, Seniority, Technologies, Skills, Technology
+  Categories, Job Countries, Job Regions or Job Cities (the contract's narrowing filters) is required, checked
+  before any request when the flow is turned on, when sample data is loaded and on every check. Minimum strength,
+  the other minimums and the dates alone do not count.
+- **Filters.** The filters of List Hiring Signals, minus Created After and Cursor, which the trigger owns.
+- **Sample data.** A fixed, fictional signal; loading it makes no request and is not billed. Activepieces runs `test`
+  each time sample data is loaded, and a real read would bill a signal each time. The sample goes through the same
+  flattening as real signals, so a flow mapped on it maps the same fields. The filters are still checked.
+- **Output.** One flat signal record per signal, the same shape as an item of `signals` from List Hiring Signals.
+- **Errors.** Not retried, with the actions' messages: 402, 403 `account_key_required`, the sandbox 404, 429, 5xx
+  and lost connections. A failed check leaves the stored position untouched.
 
 ### New Job trigger
 
@@ -107,7 +193,8 @@ after 5 seconds, which is the `Retry-After: 5` the feed sends with its 503. A 40
 the 429 message carries the wait the API asked for, and a 402 links to the top-up page. connector-core 0.5.0 reads a
 `Retry-After` header only on a 429; for a 503 it asks for a random delay under 1 second, so the piece waits at least
 5 seconds itself. A request that times out (120 seconds) is also retried once, so one step can take about 4 minutes
-before it fails.
+before it fails. The two hiring signals actions and the New Hiring Signal trigger are the exception: each request is
+tried once and never retried, because a signal is billed when the response is sent.
 
 ### Dropdowns
 
@@ -193,7 +280,49 @@ gets onto that CDN, so ask the maintainer. Translation files are generated night
 
 Commit with a conventional message, push, open the pull request with the template filled in, and apply the labels.
 
+## Changelog
+
+The version is `version` in `jobo/package.json`. Nothing has been published.
+
+- **0.1.0** (not published): the New Hiring Signal polling trigger, reading `GET /api/signals` with
+  `sort=created_asc` and `created_after`, with a local poller in `common/signal-poll.ts`.
+- **0.0.1** (not published): Search Jobs, Get Job by ID, Find Company, Geocode Location, List Hiring Signals, List
+  Company Hiring Signals, Custom API Call and the New Job trigger.
+
 ## Verification
+
+### After the New Hiring Signal trigger (2026-11-24)
+
+Same scratch harness as below. `test/new-hiring-signal.test.ts` (32 tests) mocks the HTTP client with a small
+server that pages in `created_asc` order on `(created_at, id)`.
+
+- Tests: `vitest run`, 9 files, 170 of 172 tests passed. The two failures are the same two as before (`classification`,
+  which the npm framework drops); `test/new-hiring-signal.test.ts` passed in full.
+- Covered: turning on and a first run make no request and record now; `sort=created_asc` and the exact `created_at`
+  (`2026-11-24T13:53:55.837281Z`, and a 4-digit fraction) are sent back unchanged; more than the maximum leaves a
+  cursor and the next checks continue with it and the same `created_after` until the end; an old batch of 30 signals
+  sharing one `created_at` arrives once across 4 checks; an empty check changes nothing; a refused cursor falls back to
+  the watermark once; a failure on the second page saves nothing and the next check repeats the read; 402, 403, the
+  sandbox 404, 429, 500 and a lost connection, none retried; no narrowing filter is refused in `onEnable`, `run` and
+  `test` before any request; the sample is free and has the keys of a real signal.
+- Mutations: keeping `created_after` at the watermark while a cursor is held failed 3 tests; removing the refused-cursor
+  fallback failed 3 tests.
+- Type-check: `tsc --noEmit` reports only fields the npm framework does not have (`classification`, `isRepublish`,
+  `advanced`, `display`) and the test helper's `HttpError` constructor.
+- Not run: lint, the build, the bundle and the builder, and no request to the real API (the API's `sort=created_asc`
+  is not deployed yet).
+
+### After the hiring signals actions (2026-11-24)
+
+Checked the same way as the review fixes below, in the same scratch harness outside this repository (npm
+`@activepieces/pieces-framework` 0.32.0, `pieces-common` 0.12.5, `@jobo-ai/connector-core` 0.5.0, vitest 5.0.5, and the
+two shims):
+
+- Tests: `vitest run`, 8 files, 138 of 140 tests passed. The two failures are the same two as before (`classification`
+  and `aiMetadata`, which the npm framework drops); `test/hiring-signals.test.ts` passed in full.
+- Type-check: `tsc --noEmit` reports only the kinds of error it reported before: fields the npm framework does not
+  have (`classification`, `advanced`, `display`). None is in the request, filter, output or summary code.
+- Not run: lint, the build, the bundle and the builder. Run them before a pull request.
 
 ### After the review fixes (2026-11-23)
 
@@ -300,5 +429,13 @@ Jobo API details the references do not settle:
 - Geocode's price and "charged even when not found" are from `billing.mdx` and `openapi.yaml`; connector-core's
   `geocode` call is the one the piece makes.
 - AP polls every 5 minutes per its docs; the piece sets no schedule of its own.
+- New Hiring Signal relies on these Activepieces docs: "By default, the storage operates at the flow level" and "The
+  storage is persistent, meaning that the stored values are retained even after the execution of the piece"
+  (`build-pieces/piece-reference/persistent-storage`); "each item in the array will trigger the flow to run" and the
+  republish table (`build-pieces/piece-reference/triggers/overview`). The docs do not say what the engine does when
+  `run` returns but the flow runs cannot be started, whether a failed `run` is retried, or whether a store write is
+  committed before the items are queued.
+- The trigger code has three short comments (the poller, the save point, the sample choice). Upstream's `AGENTS.md`
+  asks for no comments; remove them before an upstream pull request if a reviewer asks.
 - Get Job by ID throws on an unknown ID (so a flow can use "continue on failure"); Find Company and Geocode return an
   empty list instead. That split is a design choice, not something the references prescribe.

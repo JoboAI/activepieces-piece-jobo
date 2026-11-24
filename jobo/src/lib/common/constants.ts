@@ -28,6 +28,9 @@ const TRIGGER_SAMPLE_SIZE = 5
 const TRIGGER_ENABLED_AT_KEY = 'joboEnabledAt'
 const TRIGGER_SEEN_KEY = 'joboSeenJobs'
 const TRIGGER_SCAN_KEY = 'joboFeedScan'
+const SIGNAL_TRIGGER_STATE_KEY = 'joboSignalPoll'
+const SIGNAL_POLL_SORT = 'created_asc'
+const SIGNAL_PAGE_MAX = 200
 
 export const joboConstants = {
   BASE_URL,
@@ -57,4 +60,7 @@ export const joboConstants = {
   TRIGGER_ENABLED_AT_KEY,
   TRIGGER_SEEN_KEY,
   TRIGGER_SCAN_KEY,
+  SIGNAL_TRIGGER_STATE_KEY,
+  SIGNAL_POLL_SORT,
+  SIGNAL_PAGE_MAX,
 }
