@@ -48,10 +48,15 @@ because a saved flow keeps the text it was built with.
 
 Filters: query, location, companies (and exclude), sources, skills (and exclude), work model, employment type,
 experience level, language, industries (and exclude), job categories / subcategories / occupations (and
-excludes), company categories (and exclude), salary range, posted after / before, search descriptions, sort,
-description format, Maximum Jobs (default 10, max 100) and Page. It refuses to run with no filter, because an
-empty search returns and bills the first page of the whole index. It returns an array of flat job records
-(`id`, `title`, `company_name`, `city`, `salary_min`, ... , one level deep, so each key is a table column).
+excludes), company categories (and exclude), salary range, posted after / before, discovered after / before (the
+time Jobo first indexed the job), search descriptions, sort, description format, Maximum Jobs (default 10, max 100)
+and Page. It refuses to run with no filter, because an empty search returns and bills the first page of the whole
+index. It returns an array of flat job records (`id`, `title`, `company_name`, `city`, `salary_min`, ... , one level
+deep, so each key is a table column).
+
+A company value is never split at a comma, so a mapped name such as `Acme, Inc.` is sent whole (the n8n node does the
+same). Several values come as a mapped list, or one per line in a single text value. A company picked from the list
+carries all of its board ids, joined by line breaks.
 
 ### New Job trigger
 
@@ -62,17 +67,47 @@ trigger reads on purpose costs nothing.
 - **Guard.** At least one of Locations, Sources, Companies, Industries, Job Categories, Job Subcategories or
   Occupations is required. It is enforced when the flow is turned on (`onEnable` fails the publish), when sample
   data is loaded and on every poll. It uses `assertHasNarrowingFilter` from connector-core.
-- **Watermark.** `DedupeStrategy.TIMEBASED` through `pollingHelper`, with the whole `context` passed as upstream's
-  lint rule requires. The window starts when the flow is turned on, so existing jobs are never delivered. The feed is
-  oldest first by `created_at` (first-indexed time), so the stored watermark is the newest job read.
-- **Overlap.** Each poll starts 60 seconds before the watermark, never before the moment the flow was turned on,
-  and keeps the ids it emitted (last 2,000) in the trigger store. A job the index published late (created inside the
-  overlap, not seen yet) is delivered once; a job created before the flow was turned on is not.
+- **Scans, not a watermark.** The trigger keeps its own state in the trigger store instead of `pollingHelper`'s
+  time watermark. A watermark only moves when a poll returns a new job, so a window that starts with more
+  already-delivered or re-posted jobs than one poll can read (one employer's 800 jobs indexed in the same second, or
+  jobs the employer re-posted, which keep their old first-indexed time and sort first) would be read again on every
+  poll and the trigger would stop delivering for good. Instead a scan starts with `posted_after` set to the scan's
+  start of window, records when it started, and each poll continues the stored feed cursor where the last one stopped.
+  A cursor keeps the scan's filters and batch size, and the feed lets a scan be continued later. The window of the
+  first scan starts when the flow is turned on, so existing jobs are never delivered.
+- **Which jobs are delivered.** A job is delivered when it is not in the trigger's list of delivered ids and was first
+  indexed (`created_at`) at or after both the scan's start of window and the moment the flow was turned on. The feed's
+  `posted_after` also matches a job whose employer posting time is new; such a re-posted job was first indexed earlier,
+  so it is read (and billed, unless your account received it in the last 30 days) but not delivered. The feed has no
+  filter on first-indexed time alone that would leave it out.
+- **Overlap.** When a scan has read everything (`has_more` false), the next scan's window starts 15 minutes before the
+  finished scan started (`TRIGGER_SCAN_OVERLAP_FOR_MIRROR_DELAY_MS`). Production serves the feed from a mirror that can
+  make a job readable some minutes after its `created_at`; the overlap reads those jobs again, and the delivered-id
+  list keeps each one to a single delivery. Re-reading a job you already received is free for 30 days.
+- **Delivered ids.** The list keeps the id and first-indexed time of each delivered job that a later scan can still
+  read, and drops the rest; it holds at most 5,000 ids. More than 5,000 matching jobs first indexed inside one window
+  could deliver the oldest of them twice.
+- **Restarts and failures.** A 409 `feed_cursor_restart_required`, or a 400 for a held cursor, drops the cursor and
+  starts the same scan again from its start of window; the delivered-id list stops repeats. A 400 on the first page
+  of a scan is an error. If a page fails, the poll fails and stores nothing, so the next poll reads the same pages
+  again (free for 30 days). Changing the filters on a republish starts the scan again with the new filters from the
+  same start of window; a republish with the same filters keeps the scan running.
 - **Caps.** 25 jobs per feed request and at most 20 requests per poll (500 jobs). A bigger backlog is drained over the
-  next polls from the watermark. 25 keeps the wallet check at a quarter of the 100-job page; the check prices a full
-  page even when the page is empty (`billing.mdx`, "Request flow").
-- **Sample data.** Up to 5 jobs from the last 7 days, one request, newest first, nothing stored.
-- **Output.** One flat job record per run, the same shape as Search Jobs.
+  next polls by continuing the cursor. 25 keeps the wallet check at a quarter of the 100-job page; the check prices a
+  full page even when the page is empty (`billing.mdx`, "Request flow").
+- **Sample data.** One request for up to 5 jobs from the last 7 days, in feed order: the feed reads oldest first by
+  first-indexed time and cannot sort newest first, so these are the oldest matching jobs of that week, not the
+  newest. A job the employer re-posted that week can be among them. Nothing is stored.
+- **Output.** One flat job record per job, the same shape as Search Jobs.
+
+### Errors and retries
+
+Each request is tried at most twice. A retry happens only for an HTTP 408 or 5xx response or a network failure,
+after 5 seconds, which is the `Retry-After: 5` the feed sends with its 503. A 401, 402, 409 or 429 is not retried:
+the 429 message carries the wait the API asked for, and a 402 links to the top-up page. connector-core 0.5.0 reads a
+`Retry-After` header only on a 429; for a 503 it asks for a random delay under 1 second, so the piece waits at least
+5 seconds itself. A request that times out (120 seconds) is also retried once, so one step can take about 4 minutes
+before it fails.
 
 ### Dropdowns
 
@@ -160,6 +195,25 @@ Commit with a conventional message, push, open the pull request with the templat
 
 ## Verification
 
+### After the review fixes (2026-11-23)
+
+The New Job trigger's scan, the company value rule, the discovered dates, the retry and the minimum release were
+changed after the run described further down. They were checked without an upstream checkout:
+
+- Tests: `vitest run` (vitest 5.0.5) over the piece's own tests, with `@activepieces/pieces-framework` 0.32.0 and
+  `pieces-common` 0.12.5 from npm in a scratch folder outside this repository, plus two small shims there: the
+  framework's `createMockActionContext` and `PieceCategory`, and `HttpError` with the constructor upstream's test
+  helper uses. 79 of 81 tests passed. The two failures assert `classification` and `aiMetadata` on the action and
+  trigger definitions, fields the npm 0.32.0 framework drops; the upstream sources keep them.
+- Mutations of the trigger (no held cursor, no scan-window check, no cursor restart, no delivered-id check) each
+  made trigger tests fail.
+- Type-check: `tsc --noEmit` against the same npm packages. Every error it reports is a field the npm framework does
+  not have yet (`classification`, `advanced`, `display`, `isRepublish`, the `HttpError` constructor); none is in the
+  changed logic, and the calls into `@jobo-ai/connector-core` 0.5.0 type-check.
+- Not run: the upstream-source harness below, lint, the build and the bundle. Run them again before a pull request.
+
+### First run
+
 Run on 2026-11-23 against upstream commit `1d55703` (2026-11-22), with Node 22.22.1, TypeScript 5.5.4, vitest
 5.0.5, eslint 8.57.0 and @typescript-eslint 7.18.0, the versions upstream's `package.json` pins.
 
@@ -217,21 +271,28 @@ Upstream conventions I could not confirm:
 - Whether `refreshOnSearch` keeps already-picked values visible in a multi-select when the search text changes. The
   framework and docs support the option; the UI behaviour was not seen.
 - How the logo reaches `cdn.activepieces.com/pieces/jobo.png`.
-- The exact `minimumSupportedRelease`: `0.36.1` is what the scaffold writes, and the framework raises it to 0.82.0.
 - Whether a new third-party runtime dependency (`@jobo-ai/connector-core`) passes review. The docs allow
   libraries ("Make sure you are using well-maintained libraries"). If not, the piece needs about 150 lines ported
   from connector-core (search body mapping, narrowing check, error classes).
-- Whether `authors: []` is acceptable; the scaffold writes it empty and expects a GitHub username.
+- Whether `authors: []` is acceptable; the scaffold writes it empty and expects a GitHub username. It stays empty
+  until a contributor's GitHub username is known (step 3 above).
+
+`minimumSupportedRelease` is `0.82.0`: the framework raises any lower value to its
+`MINIMUM_SUPPORTED_RELEASE_AFTER_LATEST_CONTEXT_VERSION`, which is `0.82.0` (seen in the first run against
+upstream's sources, and read again in the npm 0.32.0 package), so the code now says what the published metadata
+will say.
 
 Jobo API details the references do not settle:
 - `/api/connectors/*` (filters, filter-options, companies/suggest, locations/suggest) are not in `docs/openapi.yaml`
   or `docs/billing.mdx`. That they never deduct credits comes from connector-core's code comments and the Zapier
   connector's use of them. `billing.mdx` lists `GET /api/jobs/{id}`, `/api/jobs/expired` and `/api/occupations`
   as always free. If a documented endpoint is preferred for the connection check, `GET /api/jobs/expired` is.
-- `X-Jobo-Client: activepieces` is sent, but the API counts a name as `other` until it is on the server's
-  allowlist (`packages/connector-core/src/client.ts`). That needs a server-side entry.
-- Whether a job indexed late can appear in the feed with a `created_at` older than the previous poll. The trigger
-  assumes it can (a 60-second overlap with a seen-id set); connector-core's own poller uses the same 60 seconds.
+- `X-Jobo-Client: activepieces` is sent, but the server's allowlist (`KnownClients` in
+  `Jobo.Enterprise/Web/Jobo.Enterprise.External.Api/Middleware/ExternalApiUsageMetricsMiddleware.cs`) does not list
+  `activepieces`, so this piece's requests are counted as `other`. That needs a server-side entry.
+- How late the production feed mirror can serve a job after its `created_at`. The trigger re-reads 15 minutes before
+  each finished scan started; a job the mirror serves later than that, behind a scan that has already passed it, is
+  missed.
 - `posted_after` on the feed matches "employer posting time or first-indexed time" (`openapi.yaml`). The trigger
   treats a job as new by `created_at` (first-indexed), so a job whose employer posting time is new but which was
   indexed before the flow was turned on is not delivered.

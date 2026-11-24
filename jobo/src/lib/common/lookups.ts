@@ -45,7 +45,7 @@ async function loadCompanies({ apiKey, query }: { apiKey: string, query: string 
         (data.suggestions ?? []).map((company) => {
           const details = [company.domain, company.country].filter(Boolean).join(', ')
           const ids = Array.isArray(company.ids) && company.ids.length > 0 ? company.ids : [company.id]
-          return { label: details ? `${company.name} (${details})` : company.name, value: ids.join(',') }
+          return { label: details ? `${company.name} (${details})` : company.name, value: ids.join(joboConstants.COMPANY_ID_SEPARATOR) }
         }),
       )
     },

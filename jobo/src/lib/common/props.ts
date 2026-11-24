@@ -136,6 +136,7 @@ const companies = companyList({
   description:
     'Only jobs at these companies. Type at least 2 letters of a company name or website domain, then pick the company. ' +
     'To use a value from an earlier step, map a Jobo company ID, a website domain such as stripe.com, or an exact company name. ' +
+    'Map a list, or put one value per line, for several; a value is never split at a comma, so a name such as "Acme, Inc." stays whole. ' +
     FILTER_NOTE,
 })
 
@@ -339,6 +340,20 @@ const postedBefore = Property.DateTime({
   advanced: true,
 })
 
+const discoveredAfter = Property.DateTime({
+  displayName: 'Discovered After',
+  description: 'Only jobs Jobo first indexed on or after this time.',
+  required: false,
+  advanced: true,
+})
+
+const discoveredBefore = Property.DateTime({
+  displayName: 'Discovered Before',
+  description: 'Only jobs Jobo first indexed on or before this time.',
+  required: false,
+  advanced: true,
+})
+
 const sort = Property.StaticDropdown<string, false>({
   displayName: 'Sort',
   description: 'Relevance is the default. The other two order by the time Jobo first indexed the job.',
@@ -410,6 +425,8 @@ export const joboProps = {
   maxSalary,
   postedAfter,
   postedBefore,
+  discoveredAfter,
+  discoveredBefore,
   sort,
   limit,
   page,

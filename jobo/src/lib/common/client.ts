@@ -19,7 +19,7 @@ async function withJobo<T>({ apiKey, run }: WithJoboParams<T>): Promise<T> {
   const client = new JoboClient({
     apiKey,
     transport,
-    retry: { sleep: noSleep, maxAttempts: 1, retryRateLimit: false },
+    retry: { sleep: waitBeforeRetry, maxAttempts: joboConstants.RETRY_MAX_ATTEMPTS, retryRateLimit: false },
     timeoutMs: joboConstants.REQUEST_TIMEOUT_MS,
     client: joboConstants.CLIENT_NAME,
     userAgent: joboConstants.USER_AGENT,
@@ -105,8 +105,9 @@ function asText(body: unknown): string {
   return body === undefined || body === null ? '' : JSON.stringify(body)
 }
 
-async function noSleep(): Promise<void> {
-  return undefined
+async function waitBeforeRetry(ms: number): Promise<void> {
+  const delay = Math.max(ms, joboConstants.RETRY_DELAY_MS)
+  await new Promise<void>((resolve) => setTimeout(resolve, delay))
 }
 
 function readString({ body, key }: { body: unknown, key: string }): string | null {

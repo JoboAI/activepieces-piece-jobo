@@ -13,7 +13,7 @@ export const jobo = createPiece({
   description:
     'Search and monitor open jobs from employer career sites and applicant tracking systems with the Jobo jobs data API.',
   auth: joboAuth,
-  minimumSupportedRelease: '0.36.1',
+  minimumSupportedRelease: '0.82.0',
   logoUrl: 'https://cdn.activepieces.com/pieces/jobo.png',
   categories: [PieceCategory.HUMAN_RESOURCES],
   authors: [],

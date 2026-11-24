@@ -47,9 +47,14 @@ describe('auth validate', () => {
     expect(limited.valid === false && limited.error).toContain('Try again in 7 seconds')
 
     vi.restoreAllMocks()
-    mockApi(() => ({ status: 500, body: { message: 'boom' } }))
-    const failed = await validate({ auth: FAKE_KEY, server })
+    vi.useFakeTimers()
+    const { requests } = mockApi(() => ({ status: 500, body: { message: 'boom' } }))
+    const pending = validate({ auth: FAKE_KEY, server })
+    await vi.advanceTimersByTimeAsync(5_000)
+    const failed = await pending
+    vi.useRealTimers()
     expect(failed.valid === false && failed.error).toContain('HTTP 500')
+    expect(requests).toHaveLength(2)
   })
 
   test('never puts the key in an error message', async () => {

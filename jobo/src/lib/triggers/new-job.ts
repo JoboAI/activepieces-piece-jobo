@@ -1,14 +1,17 @@
-import { DedupeStrategy, pollingHelper, type Polling } from '@activepieces/pieces-common'
 import {
   createTrigger,
   isNil,
   Property,
   TriggerStrategy,
-  type AppConnectionValueForAuthProperty,
   type Store,
-  type StaticPropsValue,
 } from '@activepieces/pieces-framework'
-import type { Job, JobFeedParams, JoboClient } from '@jobo-ai/connector-core'
+import {
+  FeedCursorRestartRequiredError,
+  JoboApiError,
+  type Job,
+  type JobFeedParams,
+  type JoboClient,
+} from '@jobo-ai/connector-core'
 import { joboAuth } from '../auth'
 import { joboClient } from '../common/client'
 import { joboConstants } from '../common/constants'
@@ -46,21 +49,6 @@ const props = {
   description_format: joboProps.descriptionFormat,
 }
 
-const polling: Polling<AppConnectionValueForAuthProperty<typeof joboAuth>, StaticPropsValue<typeof props>> = {
-  strategy: DedupeStrategy.TIMEBASED,
-  items: async ({ auth, store, propsValue, lastFetchEpochMS }) => {
-    joboFilters.requireNarrowingFilter({ values: propsValue, labels: NARROWING_TEXT })
-    const feedBody = joboFilters.toFeedBody(propsValue)
-    return joboClient.withJobo({
-      apiKey: auth.secret_text,
-      run: (client) =>
-        lastFetchEpochMS === 0
-          ? readSample({ client, feedBody })
-          : readNewJobs({ client, feedBody, store, lastFetchEpochMS }),
-    })
-  },
-}
-
 export const newJob = createTrigger({
   auth: joboAuth,
   name: 'new_job',
@@ -76,72 +64,120 @@ export const newJob = createTrigger({
   sampleData: joboOutput.JOB_SAMPLE,
   async onEnable(context) {
     joboFilters.requireNarrowingFilter({ values: context.propsValue, labels: NARROWING_TEXT })
-    await pollingHelper.onEnable(polling, context)
     const alreadyStarted = !isNil(await context.store.get<number>(joboConstants.TRIGGER_ENABLED_AT_KEY))
     if (context.isRepublish && alreadyStarted) return
     await context.store.put(joboConstants.TRIGGER_ENABLED_AT_KEY, Date.now())
-    await context.store.put<string[]>(joboConstants.TRIGGER_SEEN_KEY, [])
+    await context.store.put<SeenJob[]>(joboConstants.TRIGGER_SEEN_KEY, [])
+    await context.store.delete(joboConstants.TRIGGER_SCAN_KEY)
   },
-  async onDisable(context) {
-    await pollingHelper.onDisable(polling, context)
+  async onDisable() {
+    return
   },
   async run(context) {
-    return pollingHelper.poll(polling, context)
+    joboFilters.requireNarrowingFilter({ values: context.propsValue, labels: NARROWING_TEXT })
+    const feedBody = joboFilters.toFeedBody(context.propsValue)
+    return joboClient.withJobo({
+      apiKey: context.auth.secret_text,
+      run: (client) => readNewJobs({ client, feedBody, store: context.store }),
+    })
   },
   async test(context) {
-    return pollingHelper.test(polling, context)
+    joboFilters.requireNarrowingFilter({ values: context.propsValue, labels: NARROWING_TEXT })
+    const feedBody = joboFilters.toFeedBody(context.propsValue)
+    return joboClient.withJobo({
+      apiKey: context.auth.secret_text,
+      run: (client) => readSample({ client, feedBody }),
+    })
   },
 })
 
-async function readSample({ client, feedBody }: { client: JoboClient, feedBody: JobFeedParams }): Promise<PollItem[]> {
+async function readSample({ client, feedBody }: { client: JoboClient, feedBody: JobFeedParams }): Promise<unknown[]> {
   const since = Date.now() - joboConstants.TRIGGER_SAMPLE_LOOKBACK_DAYS * DAY_MS
   const { data } = await client.feed({
     ...feedBody,
     posted_after: new Date(since).toISOString(),
     batch_size: joboConstants.TRIGGER_SAMPLE_SIZE,
   })
-  return [...(data.jobs ?? [])].reverse().map((job) => ({
-    epochMilliSeconds: createdAtOf(job) ?? 0,
-    data: joboOutput.flattenJob(job),
-  }))
+  return (data.jobs ?? []).map(joboOutput.flattenJob)
 }
 
-async function readNewJobs({ client, feedBody, store, lastFetchEpochMS }: ReadNewJobsParams): Promise<PollItem[]> {
-  const enabledAt = await store.get<number>(joboConstants.TRIGGER_ENABLED_AT_KEY)
-  const seenIds = (await store.get<string[]>(joboConstants.TRIGGER_SEEN_KEY)) ?? []
-  const since = Math.max(lastFetchEpochMS - joboConstants.TRIGGER_LAP_MS, enabledAt ?? lastFetchEpochMS)
+async function readNewJobs({ client, feedBody, store }: { client: JoboClient, feedBody: JobFeedParams, store: Store }): Promise<unknown[]> {
+  const enabledAt = await readEnabledAt({ store })
+  const seenJobs = (await store.get<SeenJob[]>(joboConstants.TRIGGER_SEEN_KEY)) ?? []
+  const filters = JSON.stringify(feedBody)
+  const storedScan = await store.get<FeedScan>(joboConstants.TRIGGER_SCAN_KEY)
+  let scan = storedScan ?? newScan({ since: enabledAt, filters })
+  if (scan.filters !== filters) scan = newScan({ since: scan.since, filters })
 
-  const jobs = await readFeed({
-    client,
-    body: { ...feedBody, posted_after: new Date(since).toISOString(), batch_size: joboConstants.TRIGGER_BATCH_SIZE },
-  })
+  const seen = new Set(seenJobs.map((entry) => entry.id))
+  const recorded = [...seenJobs]
+  const fresh: Job[] = []
 
-  const seen = new Set(seenIds)
-  const fresh = jobs.filter((job) => {
-    const createdAt = createdAtOf(job)
-    const isNew = !seen.has(job.id) && (createdAt === null || createdAt >= since)
-    seen.add(job.id)
-    return isNew
-  })
-
-  await store.put<string[]>(joboConstants.TRIGGER_SEEN_KEY, [...seenIds, ...fresh.map((job) => job.id)].slice(-joboConstants.TRIGGER_SEEN_LIMIT))
-
-  return fresh.map((job) => ({
-    epochMilliSeconds: Math.max(createdAtOf(job) ?? 0, lastFetchEpochMS + 1),
-    data: joboOutput.flattenJob(job),
-  }))
-}
-
-async function readFeed({ client, body }: { client: JoboClient, body: JobFeedParams }): Promise<Job[]> {
-  const jobs: Job[] = []
-  let cursor: string | null = null
   for (let page = 1; page <= joboConstants.TRIGGER_MAX_PAGES; page++) {
-    const { data } = await client.feed(cursor === null ? body : { cursor })
-    jobs.push(...(data.jobs ?? []))
-    if (!data.has_more || !data.next_cursor) break
-    cursor = data.next_cursor
+    const cursor = scan.cursor
+    const startedAt = cursor === null ? Date.now() : scan.startedAt ?? Date.now()
+    const body: JobFeedParams =
+      cursor === null
+        ? { ...feedBody, posted_after: new Date(scan.since).toISOString(), batch_size: joboConstants.TRIGGER_BATCH_SIZE }
+        : { cursor }
+
+    const response = await readPage({ client, body, restartable: cursor !== null })
+    if (response === null) {
+      scan = newScan({ since: scan.since, filters })
+      continue
+    }
+
+    for (const job of response.jobs ?? []) {
+      const createdAt = createdAtOf(job)
+      if (seen.has(job.id)) continue
+      if (createdAt !== null && (createdAt < scan.since || createdAt < enabledAt)) continue
+      seen.add(job.id)
+      fresh.push(job)
+      recorded.push({ id: job.id, createdAt: createdAt ?? startedAt })
+    }
+
+    if (response.has_more && response.next_cursor) {
+      scan = { ...scan, startedAt, cursor: response.next_cursor }
+      continue
+    }
+    const nextSince = Math.max(startedAt - joboConstants.TRIGGER_SCAN_OVERLAP_FOR_MIRROR_DELAY_MS, enabledAt)
+    scan = newScan({ since: nextSince, filters })
+    break
   }
-  return jobs
+
+  const stillNeeded = recorded.filter((entry) => entry.createdAt >= scan.since).slice(-joboConstants.TRIGGER_SEEN_LIMIT)
+  await store.put<FeedScan>(joboConstants.TRIGGER_SCAN_KEY, scan)
+  await store.put<SeenJob[]>(joboConstants.TRIGGER_SEEN_KEY, stillNeeded)
+
+  return fresh.map(joboOutput.flattenJob)
+}
+
+async function readPage({ client, body, restartable }: { client: JoboClient, body: JobFeedParams, restartable: boolean }) {
+  try {
+    const { data } = await client.feed(body)
+    return data
+  }
+  catch (error) {
+    if (restartable && mustRestartScan(error)) return null
+    throw error
+  }
+}
+
+function mustRestartScan(error: unknown): boolean {
+  if (error instanceof FeedCursorRestartRequiredError) return true
+  return error instanceof JoboApiError && error.status === 400
+}
+
+async function readEnabledAt({ store }: { store: Store }): Promise<number> {
+  const stored = await store.get<number>(joboConstants.TRIGGER_ENABLED_AT_KEY)
+  if (!isNil(stored)) return stored
+  const now = Date.now()
+  await store.put(joboConstants.TRIGGER_ENABLED_AT_KEY, now)
+  return now
+}
+
+function newScan({ since, filters }: { since: number, filters: string }): FeedScan {
+  return { since, startedAt: null, cursor: null, filters }
 }
 
 function createdAtOf(job: Job): number | null {
@@ -149,11 +185,11 @@ function createdAtOf(job: Job): number | null {
   return Number.isNaN(parsed) ? null : parsed
 }
 
-type PollItem = { epochMilliSeconds: number, data: unknown }
-
-type ReadNewJobsParams = {
-  client: JoboClient
-  feedBody: JobFeedParams
-  store: Store
-  lastFetchEpochMS: number
+type FeedScan = {
+  since: number
+  startedAt: number | null
+  cursor: string | null
+  filters: string
 }
+
+type SeenJob = { id: string, createdAt: number }

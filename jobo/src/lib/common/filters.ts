@@ -35,6 +35,8 @@ function readSearchFilters(values: Values): JobSearchFilters {
     max_salary_usd: readNumber({ values, key: 'max_salary_usd' }),
     posted_after: readText({ values, key: 'posted_after' }),
     posted_before: readText({ values, key: 'posted_before' }),
+    discovered_after: readText({ values, key: 'discovered_after' }),
+    discovered_before: readText({ values, key: 'discovered_before' }),
     sort: readSort(values['sort']),
     description_format: readDescriptionFormat(values['description_format']),
   }
@@ -170,7 +172,8 @@ function readIds({ values, key }: { values: Values, key: string }): string[] | u
   const value = values[key]
   const entries = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
   const ids = entries
-    .flatMap((entry) => String(entry).split(/[\n,]/))
+    .filter((entry) => entry !== undefined && entry !== null)
+    .flatMap((entry) => String(entry).split(joboConstants.COMPANY_ID_SEPARATOR))
     .map((id) => id.trim())
     .filter((id) => id !== '')
   const unique = [...new Set(ids)]

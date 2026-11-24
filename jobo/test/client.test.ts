@@ -3,9 +3,18 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { joboClient } from '../src/lib/common/client'
 import { FAKE_KEY, mockApi } from './helpers/mock-api'
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 const call = () => joboClient.withJobo({ apiKey: FAKE_KEY, run: (client) => client.getJob('x') })
+
+async function afterRetryWait<T>(pending: Promise<T>): Promise<PromiseSettledResult<T>> {
+  const settled = Promise.allSettled([pending]).then(([result]) => result)
+  await vi.advanceTimersByTimeAsync(5_000)
+  return settled
+}
 
 describe('error mapping', () => {
   test('401 names the API keys page', async () => {
@@ -33,12 +42,33 @@ describe('error mapping', () => {
     expect(requests).toHaveLength(1)
   })
 
-  test('503 and other statuses are described with the status', async () => {
-    mockApi(() => ({ status: 503, body: { detail: 'busy' } }))
-    await expect(call()).rejects.toThrow(/temporarily unavailable \(HTTP 503\)/)
-    vi.restoreAllMocks()
-    mockApi(() => ({ status: 400, body: { detail: 'bad batch size' } }))
+  test('a 503 is retried once, 5 seconds later, then described with the status', async () => {
+    vi.useFakeTimers()
+    const { requests } = mockApi(() => ({ status: 503, body: { detail: 'busy' }, headers: { 'Retry-After': '5' } }))
+    const settled = Promise.allSettled([call()])
+    await vi.advanceTimersByTimeAsync(4_999)
+    expect(requests).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    const [result] = await settled
+    expect(requests).toHaveLength(2)
+    expect(result.status === 'rejected' && String(result.reason)).toMatch(/temporarily unavailable \(HTTP 503\)/)
+  })
+
+  test('a 503 followed by a success returns the success', async () => {
+    vi.useFakeTimers()
+    let calls = 0
+    mockApi(() => {
+      calls += 1
+      return calls === 1 ? { status: 503, body: { detail: 'busy' } } : { body: { id: 'x' } }
+    })
+    const result = await afterRetryWait(call())
+    expect(result.status === 'fulfilled' && result.value.data).toEqual({ id: 'x' })
+  })
+
+  test('a 400 is not retried and is described with the status', async () => {
+    const { requests } = mockApi(() => ({ status: 400, body: { detail: 'bad batch size' } }))
     await expect(call()).rejects.toThrow(/Jobo API error \(HTTP 400\): bad batch size/)
+    expect(requests).toHaveLength(1)
   })
 
   test('sandbox refusal explains the live key requirement', async () => {
@@ -47,8 +77,11 @@ describe('error mapping', () => {
   })
 
   test('a network failure becomes a readable error', async () => {
-    vi.spyOn(httpClient, 'sendRequest').mockRejectedValue(new Error('getaddrinfo ENOTFOUND'))
-    await expect(call()).rejects.toThrow(/Could not reach the Jobo API: getaddrinfo ENOTFOUND/)
+    vi.useFakeTimers()
+    const spy = vi.spyOn(httpClient, 'sendRequest').mockRejectedValue(new Error('getaddrinfo ENOTFOUND'))
+    const result = await afterRetryWait(call())
+    expect(result.status === 'rejected' && String(result.reason)).toMatch(/Could not reach the Jobo API: getaddrinfo ENOTFOUND/)
+    expect(spy).toHaveBeenCalledTimes(2)
   })
 
   test('refuses a malformed key before any request', async () => {

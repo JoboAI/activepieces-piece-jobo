@@ -93,7 +93,7 @@ describe('dropdown options', () => {
 
     const state = await load(joboProps.companies, {}, 'ac')
     expect(requests[0].query.get('q')).toBe('ac')
-    expect(state.options).toEqual([{ label: 'Acme (acme.example, DE)', value: 'c1,c2' }])
+    expect(state.options).toEqual([{ label: 'Acme (acme.example, DE)', value: 'c1\nc2' }])
   })
 
   test('search location gives place labels and trigger location gives structured places, skipping places without a country', async () => {

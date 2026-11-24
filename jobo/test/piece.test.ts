@@ -14,6 +14,10 @@ describe('piece definition', () => {
     expect(metadata.auth).toMatchObject({ type: 'SECRET_TEXT', required: true })
   })
 
+  test('declares the minimum release the framework would raise it to anyway', () => {
+    expect(metadata.minimumSupportedRelease).toBe('0.82.0')
+  })
+
   test('every hand-written action and the trigger carry the AI metadata upstream requires', () => {
     for (const name of ['search_jobs', 'get_job', 'find_company', 'geocode_location']) {
       const action = metadata.actions[name]

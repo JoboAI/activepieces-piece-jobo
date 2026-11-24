@@ -46,6 +46,8 @@ export const searchJobs = createAction({
     max_salary_usd: joboProps.maxSalary,
     posted_after: joboProps.postedAfter,
     posted_before: joboProps.postedBefore,
+    discovered_after: joboProps.discoveredAfter,
+    discovered_before: joboProps.discoveredBefore,
     search_description: joboProps.searchDescription,
     sort: joboProps.sort,
     description_format: joboProps.descriptionFormat,
@@ -98,4 +100,6 @@ const FILTER_KEYS = [
   'max_salary_usd',
   'posted_after',
   'posted_before',
+  'discovered_after',
+  'discovered_before',
 ]

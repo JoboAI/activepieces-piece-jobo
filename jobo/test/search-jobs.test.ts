@@ -22,7 +22,7 @@ describe('Search Jobs', () => {
     const result = await run({
       q: ' data engineer ',
       location: 'Berlin, Germany',
-      companies: ['id-1,id-2', 'stripe.com'],
+      companies: ['id-1\nid-2', 'stripe.com', 'Acme, Inc.'],
       exclude_companies: ['id-9'],
       sources: ['greenhouse'],
       skills: ['Python'],
@@ -31,6 +31,8 @@ describe('Search Jobs', () => {
       industries: ['Software Development, SaaS'],
       min_salary_usd: 90000,
       posted_after: '2026-11-01T00:00:00Z',
+      discovered_after: '2026-11-10T00:00:00Z',
+      discovered_before: '2026-11-20T00:00:00Z',
       sort: 'discovered_desc',
       search_description: false,
       limit: 5,
@@ -49,12 +51,14 @@ describe('Search Jobs', () => {
       locations: ['Berlin, Germany'],
       sources: ['greenhouse'],
       skills: { include: ['Python'] },
-      companies: { include: ['id-1', 'id-2', 'stripe.com'], exclude: ['id-9'] },
+      companies: { include: ['id-1', 'id-2', 'stripe.com', 'Acme, Inc.'], exclude: ['id-9'] },
       industries: { include: ['Software Development, SaaS'] },
       work_models: ['remote'],
       employment_types: ['full-time'],
       salary_usd: { min: 90000 },
       posted_after: '2026-11-01T00:00:00Z',
+      discovered_after: '2026-11-10T00:00:00Z',
+      discovered_before: '2026-11-20T00:00:00Z',
       sort: 'discovered_desc',
       page: 2,
       page_size: 5,
@@ -71,6 +75,42 @@ describe('Search Jobs', () => {
     await run({ q: 'nurse', limit: 0 })
     expect(requests.map((request) => (request.body as { page_size: number; page: number }).page_size)).toEqual([10, 100, 10])
     expect(requests.map((request) => (request.body as { page: number }).page)).toEqual([1, 1, 1])
+  })
+
+  test('a typed company name keeps its commas; one value per line gives several', async () => {
+    const { requests } = mockApi(() => ({ body: { jobs: [] } }))
+    await run({ companies: 'Acme, Inc.' })
+    await run({ companies: 'Acme, Inc.\nstripe.com\n' })
+    await run({ companies: ['Globex, LLC', 'Initech'] })
+    expect(requests.map((request) => (request.body as { companies: unknown }).companies)).toEqual([
+      { include: ['Acme, Inc.'] },
+      { include: ['Acme, Inc.', 'stripe.com'] },
+      { include: ['Globex, LLC', 'Initech'] },
+    ])
+  })
+
+  test('a discovered date alone counts as a filter and is sent on its own key', async () => {
+    const { requests } = mockApi(() => ({ body: { jobs: [] } }))
+    await run({ discovered_after: '2026-11-22T00:00:00Z' })
+    await run({ discovered_before: '2026-11-22T00:00:00Z' })
+    expect(requests.map((request) => request.body)).toEqual([
+      { discovered_after: '2026-11-22T00:00:00Z', page: 1, page_size: 10, include_facets: [] },
+      { discovered_before: '2026-11-22T00:00:00Z', page: 1, page_size: 10, include_facets: [] },
+    ])
+  })
+
+  test('offers every search filter of the connector contract as a property', () => {
+    const contractKeys = [
+      'q', 'location', 'sources', 'companies', 'exclude_companies', 'work_model', 'employment_type', 'experience_level',
+      'language', 'skills', 'exclude_skills', 'industries', 'exclude_industries', 'company_categories',
+      'exclude_company_categories', 'job_categories', 'exclude_job_categories', 'job_subcategories',
+      'exclude_job_subcategories', 'occupation_ids', 'exclude_occupation_ids', 'min_salary_usd', 'max_salary_usd',
+      'posted_after', 'posted_before', 'discovered_after', 'discovered_before', 'search_description', 'sort',
+      'description_format',
+    ]
+    expect(Object.keys(searchJobs.props)).toEqual(expect.arrayContaining(contractKeys))
+    expect(searchJobs.props['discovered_after'].type).toBe('DATE_TIME')
+    expect(searchJobs.props['discovered_before'].type).toBe('DATE_TIME')
   })
 
   test('returns an empty list for no results', async () => {
